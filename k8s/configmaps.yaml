@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: message-queue-config
+  namespace: security-saas
+data:
+  nats_url: "nats://nats.security-saas.svc.cluster.local:4222"
+  kafka_brokers: "kafka-0.kafka-headless.security-saas.svc.cluster.local:9092,kafka-1.kafka-headless.security-saas.svc.cluster.local:9092,kafka-2.kafka-headless.security-saas.svc.cluster.local:9092"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storage-config
+  namespace: security-saas
+data:
+  endpoint: "http://minio.security-saas.svc.cluster.local:9000"
+  bucket: "security-saas-artifacts"
+  region: "us-east-1"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: auth-config
+  namespace: security-saas
+data:
+  issuer_url: "https://auth.example.com"
+  audience: "security-saas-api"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: observability-config
+  namespace: security-saas
+data:
+  otlp_endpoint: "http://jaeger-collector.observability.svc.cluster.local:4317"
+  prometheus_url: "http://prometheus.observability.svc.cluster.local:9090"
+  grafana_url: "http://grafana.observability.svc.cluster.local:3000"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: worker-config
+  namespace: security-saas
+data:
+  static_worker_concurrency: "10"
+  dynamic_worker_concurrency: "5"
+  behavioral_worker_concurrency: "20"
+  sandbox_timeout_seconds: "300"
+  yara_rules_path: "/etc/yara-rules"

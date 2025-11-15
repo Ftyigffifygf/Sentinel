@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-adapter-config
+  namespace: monitoring
+data:
+  config.yaml: |
+    rules:
+    # Queue depth metrics for HPA
+    - seriesQuery: 'analysis_queue_depth{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+          pod: {resource: "pod"}
+      name:
+        matches: "^analysis_queue_depth"
+        as: "analysis_queue_depth"
+      metricsQuery: 'avg_over_time(analysis_queue_depth{<<.LabelMatchers>>}[2m])'
+
+    # Active tasks metrics for HPA
+    - seriesQuery: 'analysis_active_tasks{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+          pod: {resource: "pod"}
+      name:
+        matches: "^analysis_active_tasks"
+        as: "analysis_active_tasks"
+      metricsQuery: 'avg_over_time(analysis_active_tasks{<<.LabelMatchers>>}[1m])'
+
+    # Job processing rate for monitoring
+    - seriesQuery: 'analysis_jobs_processed_total{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+          pod: {resource: "pod"}
+      name:
+        matches: "^analysis_jobs_processed_total"
+        as: "analysis_jobs_processed_rate"
+      metricsQuery: 'rate(analysis_jobs_processed_total{<<.LabelMatchers>>}[5m])'
+
+    # Analysis duration for monitoring
+    - seriesQuery: 'analysis_duration_seconds_sum{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+          pod: {resource: "pod"}
+      name:
+        matches: "^analysis_duration_seconds_sum"
+        as: "analysis_duration_seconds_avg"
+      metricsQuery: 'rate(analysis_duration_seconds_sum{<<.LabelMatchers>>}[5m]) / rate(analysis_duration_seconds_count{<<.LabelMatchers>>}[5m])'

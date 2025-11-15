@@ -1,0 +1,57 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: static-worker-hpa
+  namespace: security-saas
+  labels:
+    app: static-worker
+    component: analysis
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: static-worker
+  minReplicas: 2
+  maxReplicas: 20
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 30
+          periodSeconds: 60
+      selectPolicy: Min
+  metrics:
+    # Primary metric: Queue depth per pod
+    - type: Pods
+      pods:
+        metric:
+          name: analysis_queue_depth
+        target:
+          type: AverageValue
+          averageValue: "100"
+    # Secondary metric: CPU utilization
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # Tertiary metric: Active tasks per pod
+    - type: Pods
+      pods:
+        metric:
+          name: analysis_active_tasks
+        target:
+          type: AverageValue
+          averageValue: "5"

@@ -1,0 +1,86 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/api-layer",
+    "crates/static-worker",
+    "crates/dynamic-worker",
+    "crates/behavioral-worker",
+    "crates/shared-domain",
+    "crates/shared-crypto",
+    "crates/shared-db",
+    "tests/integration",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Security SaaS Team"]
+license = "MIT"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = "0.7"
+
+# Web frameworks
+axum = { version = "0.7", features = ["ws", "multipart"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors", "compression-gzip"] }
+hyper = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"] }
+
+# Message queue
+async-nats = "0.33"
+
+# Security & Crypto
+ring = "0.17"
+jsonwebtoken = "9.2"
+rustls = "0.22"
+argon2 = "0.5"
+
+# Binary analysis
+goblin = "0.8"
+yara-rust = "0.28"
+
+# Utilities
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+anyhow = "1.0"
+regex = "1.10"
+sha2 = "0.10"
+md5 = "0.7"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+
+# Redis
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry = "0.21"
+opentelemetry-jaeger = "0.20"
+tracing-opentelemetry = "0.22"
+
+# Metrics
+prometheus = "0.13"
+lazy_static = "1.4"
+
+# Testing
+mockall = "0.12"
+proptest = "1.4"
+criterion = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

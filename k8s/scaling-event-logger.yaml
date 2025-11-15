@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scaling-event-logger-script
+  namespace: security-saas
+data:
+  watch-scaling-events.sh: |
+    #!/bin/bash
+    # Script to watch and log HPA scaling events
+
+    echo "Starting HPA scaling event logger..."
+    echo "Monitoring namespace: security-saas"
+
+    # Watch HPA events and log them
+    kubectl get events -n security-saas \
+      --field-selector involvedObject.kind=HorizontalPodAutoscaler \
+      --watch \
+      --output-watch-events \
+      | while read -r line; do
+        # Parse event and extract details
+        event_type=$(echo "$line" | jq -r '.type')
+        object_name=$(echo "$line" | jq -r '.object.involvedObject.name')
+        reason=$(echo "$line" | jq -r '.object.reason')
+        message=$(echo "$line" | jq -r '.object.message')
+        timestamp=$(echo "$line" | jq -r '.object.lastTimestamp')
+        
+        # Log the scaling event
+        if [[ "$reason" == "SuccessfulRescale" ]]; then
+          echo "[$(date -Iseconds)] SCALING_EVENT: HPA=$object_name REASON=$reason MESSAGE=\"$message\""
+          
+          # Extract replica counts from message
+          if [[ "$message" =~ scaled.*from\ ([0-9]+)\ to\ ([0-9]+) ]]; then
+            old_replicas="${BASH_REMATCH[1]}"
+            new_replicas="${BASH_REMATCH[2]}"
+            
+            # Determine direction
+            if [ "$new_replicas" -gt "$old_replicas" ]; then
+              direction="UP"
+            else
+              direction="DOWN"
+            fi
+            
+            # Get current metrics
+            queue_depth=$(kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1/namespaces/security-saas/pods/*/analysis_queue_depth" 2>/dev/null | jq -r '.items[0].value' || echo "N/A")
+            
+            # Log structured event
+            echo "{\"timestamp\":\"$(date -Iseconds)\",\"hpa\":\"$object_name\",\"direction\":\"$direction\",\"old_replicas\":$old_replicas,\"new_replicas\":$new_replicas,\"queue_depth\":\"$queue_depth\",\"reason\":\"$reason\",\"message\":\"$message\"}"
+          fi
+        fi
+      done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scaling-event-logger
+  namespace: security-saas
+  labels:
+    app: scaling-event-logger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scaling-event-logger
+  template:
+    metadata:
+      labels:
+        app: scaling-event-logger
+    spec:
+      serviceAccountName: scaling-event-logger
+      containers:
+        - name: logger
+          image: bitnami/kubectl:latest
+          command: ["/bin/bash"]
+          args: ["/scripts/watch-scaling-events.sh"]
+          env:
+            - name: NAMESPACE
+              value: security-saas
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: scripts
+          configMap:
+            name: scaling-event-logger-script
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scaling-event-logger
+  namespace: security-saas
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scaling-event-logger
+  namespace: security-saas
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["custom.metrics.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scaling-event-logger
+  namespace: security-saas
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scaling-event-logger
+subjects:
+  - kind: ServiceAccount
+    name: scaling-event-logger
+    namespace: security-saas

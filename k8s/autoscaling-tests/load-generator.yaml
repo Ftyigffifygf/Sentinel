@@ -1,0 +1,172 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: load-generator-script
+  namespace: security-saas
+data:
+  generate-load.sh: |
+    #!/bin/bash
+    # Load generator for testing worker autoscaling
+
+    set -e
+
+    NATS_URL="${NATS_URL:-nats://nats.security-saas.svc.cluster.local:4222}"
+    SUBJECT="${SUBJECT:-artifacts.uploaded}"
+    MESSAGE_COUNT="${MESSAGE_COUNT:-1000}"
+    RATE="${RATE:-10}"  # messages per second
+
+    echo "Starting load generator..."
+    echo "NATS URL: $NATS_URL"
+    echo "Subject: $SUBJECT"
+    echo "Message count: $MESSAGE_COUNT"
+    echo "Rate: $RATE msg/sec"
+
+    # Install NATS CLI if not present
+    if ! command -v nats &> /dev/null; then
+        echo "Installing NATS CLI..."
+        curl -sf https://binaries.nats.dev/nats-io/natscli/nats@latest | sh
+        export PATH="$PATH:$HOME/.nats/bin"
+    fi
+
+    # Calculate delay between messages
+    DELAY=$(echo "scale=3; 1/$RATE" | bc)
+
+    echo "Publishing $MESSAGE_COUNT messages at $RATE msg/sec (delay: ${DELAY}s)..."
+
+    for i in $(seq 1 $MESSAGE_COUNT); do
+        # Generate test message
+        MESSAGE=$(cat <<EOF
+    {
+      "artifact_id": "test-$(uuidgen)",
+      "tenant_id": "test-tenant-$(( RANDOM % 5 + 1 ))",
+      "artifact_hash": "$(openssl rand -hex 32)",
+      "storage_path": "/test/artifacts/$(uuidgen).bin",
+      "priority": "normal",
+      "analysis_type": "full"
+    }
+    EOF
+    )
+        
+        # Publish message
+        echo "$MESSAGE" | nats pub "$SUBJECT" --server="$NATS_URL" || true
+        
+        # Progress indicator
+        if [ $(( i % 100 )) -eq 0 ]; then
+            echo "Published $i/$MESSAGE_COUNT messages..."
+        fi
+        
+        # Rate limiting
+        sleep "$DELAY"
+    done
+
+    echo "Load generation complete. Published $MESSAGE_COUNT messages."
+
+  burst-load.sh: |
+    #!/bin/bash
+    # Burst load generator for testing rapid scale-up
+
+    set -e
+
+    NATS_URL="${NATS_URL:-nats://nats.security-saas.svc.cluster.local:4222}"
+    SUBJECT="${SUBJECT:-artifacts.uploaded}"
+    BURST_SIZE="${BURST_SIZE:-500}"
+
+    echo "Starting burst load generator..."
+    echo "Burst size: $BURST_SIZE messages"
+
+    # Install NATS CLI if not present
+    if ! command -v nats &> /dev/null; then
+        curl -sf https://binaries.nats.dev/nats-io/natscli/nats@latest | sh
+        export PATH="$PATH:$HOME/.nats/bin"
+    fi
+
+    echo "Publishing $BURST_SIZE messages as fast as possible..."
+
+    for i in $(seq 1 $BURST_SIZE); do
+        MESSAGE=$(cat <<EOF
+    {
+      "artifact_id": "burst-$(uuidgen)",
+      "tenant_id": "test-tenant-1",
+      "artifact_hash": "$(openssl rand -hex 32)",
+      "storage_path": "/test/artifacts/$(uuidgen).bin",
+      "priority": "high",
+      "analysis_type": "full"
+    }
+    EOF
+    )
+        
+        echo "$MESSAGE" | nats pub "$SUBJECT" --server="$NATS_URL" &
+    done
+
+    wait
+    echo "Burst load complete. Published $BURST_SIZE messages."
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-generator-steady
+  namespace: security-saas
+spec:
+  template:
+    metadata:
+      labels:
+        app: load-generator
+        type: steady
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: generator
+          image: ubuntu:22.04
+          command: ["/bin/bash"]
+          args: ["/scripts/generate-load.sh"]
+          env:
+            - name: NATS_URL
+              value: "nats://nats.security-saas.svc.cluster.local:4222"
+            - name: SUBJECT
+              value: "artifacts.uploaded"
+            - name: MESSAGE_COUNT
+              value: "1000"
+            - name: RATE
+              value: "10"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: load-generator-script
+            defaultMode: 0755
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-generator-burst
+  namespace: security-saas
+spec:
+  template:
+    metadata:
+      labels:
+        app: load-generator
+        type: burst
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: generator
+          image: ubuntu:22.04
+          command: ["/bin/bash"]
+          args: ["/scripts/burst-load.sh"]
+          env:
+            - name: NATS_URL
+              value: "nats://nats.security-saas.svc.cluster.local:4222"
+            - name: SUBJECT
+              value: "artifacts.uploaded"
+            - name: BURST_SIZE
+              value: "500"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: load-generator-script
+            defaultMode: 0755

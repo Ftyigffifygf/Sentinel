@@ -1,0 +1,316 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-config
+  namespace: security-saas
+data:
+  nats.conf: |
+    # NATS Server Configuration
+    port: 4222
+    http_port: 8222
+
+    # Clustering
+    cluster {
+      name: security-saas-cluster
+      port: 6222
+      
+      routes = [
+        nats://nats-0.nats.security-saas.svc.cluster.local:6222
+        nats://nats-1.nats.security-saas.svc.cluster.local:6222
+        nats://nats-2.nats.security-saas.svc.cluster.local:6222
+      ]
+      
+      cluster_advertise: $CLUSTER_ADVERTISE
+      connect_retries: 30
+    }
+
+    # JetStream for persistence
+    jetstream {
+      store_dir: /data/jetstream
+      max_memory_store: 1GB
+      max_file_store: 10GB
+    }
+
+    # Logging
+    debug: false
+    trace: false
+    logtime: true
+
+    # Limits
+    max_connections: 10000
+    max_payload: 10MB
+    max_pending: 64MB
+
+    # Authentication (use in production)
+    # authorization {
+    #   user: $NATS_USER
+    #   password: $NATS_PASSWORD
+    # }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: security-saas
+  labels:
+    app: nats
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: client
+      port: 4222
+      targetPort: 4222
+    - name: cluster
+      port: 6222
+      targetPort: 6222
+    - name: monitor
+      port: 8222
+      targetPort: 8222
+  selector:
+    app: nats
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats-client
+  namespace: security-saas
+  labels:
+    app: nats
+spec:
+  type: ClusterIP
+  ports:
+    - name: client
+      port: 4222
+      targetPort: 4222
+  selector:
+    app: nats
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nats
+  namespace: security-saas
+  labels:
+    app: nats
+spec:
+  serviceName: nats
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nats
+  template:
+    metadata:
+      labels:
+        app: nats
+    spec:
+      containers:
+        - name: nats
+          image: nats:2.10-alpine
+          imagePullPolicy: Always
+          ports:
+            - name: client
+              containerPort: 4222
+            - name: cluster
+              containerPort: 6222
+            - name: monitor
+              containerPort: 8222
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: CLUSTER_ADVERTISE
+              value: $(POD_NAME).nats.$(POD_NAMESPACE).svc.cluster.local
+          command:
+            - nats-server
+            - --config
+            - /etc/nats-config/nats.conf
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nats-config
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8222
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8222
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+      volumes:
+        - name: config
+          configMap:
+            name: nats-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-streams-config
+  namespace: security-saas
+data:
+  streams.json: |
+    {
+      "streams": [
+        {
+          "name": "ARTIFACTS",
+          "subjects": ["artifacts.uploaded", "artifacts.analyzed"],
+          "retention": "limits",
+          "max_age": 86400000000000,
+          "max_msgs": 1000000,
+          "max_bytes": 10737418240,
+          "storage": "file",
+          "num_replicas": 3
+        },
+        {
+          "name": "ANALYSIS",
+          "subjects": ["analysis.static.*", "analysis.dynamic.*", "analysis.behavioral.*"],
+          "retention": "limits",
+          "max_age": 86400000000000,
+          "max_msgs": 1000000,
+          "max_bytes": 10737418240,
+          "storage": "file",
+          "num_replicas": 3
+        },
+        {
+          "name": "VERDICTS",
+          "subjects": ["verdicts.generated", "verdicts.overridden"],
+          "retention": "limits",
+          "max_age": 2592000000000000,
+          "max_msgs": 10000000,
+          "max_bytes": 107374182400,
+          "storage": "file",
+          "num_replicas": 3
+        },
+        {
+          "name": "ALERTS",
+          "subjects": ["alerts.critical", "alerts.warning", "alerts.info"],
+          "retention": "limits",
+          "max_age": 604800000000000,
+          "max_msgs": 1000000,
+          "max_bytes": 10737418240,
+          "storage": "file",
+          "num_replicas": 3
+        },
+        {
+          "name": "TELEMETRY",
+          "subjects": ["telemetry.endpoints.*"],
+          "retention": "limits",
+          "max_age": 3600000000000,
+          "max_msgs": 10000000,
+          "max_bytes": 107374182400,
+          "storage": "file",
+          "num_replicas": 3
+        }
+      ]
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-stream-setup
+  namespace: security-saas
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: setup
+          image: natsio/nats-box:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for NATS to be ready..."
+              until nats --server=nats://nats-client.security-saas.svc.cluster.local:4222 server ping; do
+                sleep 2
+              done
+
+              echo "Creating JetStream streams..."
+
+              # Artifacts stream
+              nats --server=nats://nats-client.security-saas.svc.cluster.local:4222 stream add ARTIFACTS \
+                --subjects="artifacts.uploaded,artifacts.analyzed" \
+                --retention=limits \
+                --max-age=24h \
+                --max-msgs=1000000 \
+                --max-bytes=10GB \
+                --storage=file \
+                --replicas=3 \
+                --discard=old
+
+              # Analysis stream
+              nats --server=nats://nats-client.security-saas.svc.cluster.local:4222 stream add ANALYSIS \
+                --subjects="analysis.static.*,analysis.dynamic.*,analysis.behavioral.*" \
+                --retention=limits \
+                --max-age=24h \
+                --max-msgs=1000000 \
+                --max-bytes=10GB \
+                --storage=file \
+                --replicas=3 \
+                --discard=old
+
+              # Verdicts stream
+              nats --server=nats://nats-client.security-saas.svc.cluster.local:4222 stream add VERDICTS \
+                --subjects="verdicts.generated,verdicts.overridden" \
+                --retention=limits \
+                --max-age=720h \
+                --max-msgs=10000000 \
+                --max-bytes=100GB \
+                --storage=file \
+                --replicas=3 \
+                --discard=old
+
+              # Alerts stream
+              nats --server=nats://nats-client.security-saas.svc.cluster.local:4222 stream add ALERTS \
+                --subjects="alerts.critical,alerts.warning,alerts.info" \
+                --retention=limits \
+                --max-age=168h \
+                --max-msgs=1000000 \
+                --max-bytes=10GB \
+                --storage=file \
+                --replicas=3 \
+                --discard=old
+
+              # Telemetry stream
+              nats --server=nats://nats-client.security-saas.svc.cluster.local:4222 stream add TELEMETRY \
+                --subjects="telemetry.endpoints.*" \
+                --retention=limits \
+                --max-age=1h \
+                --max-msgs=10000000 \
+                --max-bytes=100GB \
+                --storage=file \
+                --replicas=3 \
+                --discard=old
+
+              echo "JetStream streams created successfully!"
+
+              # List streams
+              nats --server=nats://nats-client.security-saas.svc.cluster.local:4222 stream ls

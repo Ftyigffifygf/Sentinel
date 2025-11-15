@@ -1,0 +1,280 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-pvc
+  namespace: security-saas
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: standard
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: security-saas
+  labels:
+    app: minio
+spec:
+  serviceName: minio
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:latest
+          imagePullPolicy: Always
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          ports:
+            - name: api
+              containerPort: 9000
+              protocol: TCP
+            - name: console
+              containerPort: 9001
+              protocol: TCP
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: root_user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: root_password
+            - name: MINIO_BROWSER_REDIRECT_URL
+              value: "https://minio-console.security-saas.example.com"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: 2000m
+              memory: 8Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 500Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: security-saas
+  labels:
+    app: minio
+spec:
+  type: ClusterIP
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+    - name: console
+      port: 9001
+      targetPort: 9001
+      protocol: TCP
+  selector:
+    app: minio
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-credentials
+  namespace: security-saas
+type: Opaque
+stringData:
+  root_user: minioadmin
+  root_password: changeme-secure-minio-password
+  access_key: minioadmin
+  secret_key: changeme-secure-minio-password
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-setup
+  namespace: security-saas
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: minio/mc:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for MinIO to be ready..."
+              until mc alias set myminio http://minio.security-saas.svc.cluster.local:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD; do
+                echo "Waiting for MinIO..."
+                sleep 2
+              done
+
+              echo "Creating buckets..."
+
+              # Create main artifacts bucket
+              mc mb myminio/security-saas-artifacts --ignore-existing
+
+              # Set bucket versioning
+              mc version enable myminio/security-saas-artifacts
+
+              # Set bucket lifecycle policy (optional - for automatic cleanup)
+              cat > /tmp/lifecycle.json <<EOF
+              {
+                "Rules": [
+                  {
+                    "ID": "DeleteOldArtifacts",
+                    "Status": "Enabled",
+                    "Expiration": {
+                      "Days": 90
+                    },
+                    "Filter": {
+                      "Prefix": ""
+                    }
+                  }
+                ]
+              }
+              EOF
+
+              mc ilm import myminio/security-saas-artifacts < /tmp/lifecycle.json
+
+              # Create bucket policy for tenant isolation
+              cat > /tmp/policy.json <<EOF
+              {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Principal": {
+                      "AWS": ["*"]
+                    },
+                    "Action": [
+                      "s3:GetObject",
+                      "s3:PutObject",
+                      "s3:DeleteObject"
+                    ],
+                    "Resource": [
+                      "arn:aws:s3:::security-saas-artifacts/*"
+                    ]
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Principal": {
+                      "AWS": ["*"]
+                    },
+                    "Action": [
+                      "s3:ListBucket"
+                    ],
+                    "Resource": [
+                      "arn:aws:s3:::security-saas-artifacts"
+                    ]
+                  }
+                ]
+              }
+              EOF
+
+              mc anonymous set-json /tmp/policy.json myminio/security-saas-artifacts
+
+              echo "Creating service account for application..."
+              mc admin user add myminio security-saas-app changeme-app-password
+
+              # Create policy for application access
+              cat > /tmp/app-policy.json <<EOF
+              {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                      "s3:*"
+                    ],
+                    "Resource": [
+                      "arn:aws:s3:::security-saas-artifacts",
+                      "arn:aws:s3:::security-saas-artifacts/*"
+                    ]
+                  }
+                ]
+              }
+              EOF
+
+              mc admin policy create myminio security-saas-policy /tmp/app-policy.json
+              mc admin policy attach myminio security-saas-policy --user security-saas-app
+
+              echo "MinIO setup completed successfully!"
+
+              # List buckets
+              mc ls myminio
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: root_user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: root_password
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: minio-console-ingress
+  namespace: security-saas
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - minio-console.security-saas.example.com
+      secretName: minio-console-tls
+  rules:
+    - host: minio-console.security-saas.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: minio
+                port:
+                  number: 9001

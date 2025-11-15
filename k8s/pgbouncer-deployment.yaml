@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pgbouncer-config
+  namespace: security-saas
+data:
+  pgbouncer.ini: |
+    [databases]
+    security_saas = host=postgresql.security-saas.svc.cluster.local port=5432 dbname=security_saas
+
+    [pgbouncer]
+    listen_addr = 0.0.0.0
+    listen_port = 5432
+    auth_type = md5
+    auth_file = /etc/pgbouncer/userlist.txt
+
+    # Connection pooling settings
+    pool_mode = transaction
+    max_client_conn = 1000
+    default_pool_size = 25
+    min_pool_size = 10
+    reserve_pool_size = 5
+    reserve_pool_timeout = 3
+    max_db_connections = 100
+    max_user_connections = 100
+
+    # Logging
+    log_connections = 1
+    log_disconnections = 1
+    log_pooler_errors = 1
+
+    # Timeouts
+    server_idle_timeout = 600
+    server_lifetime = 3600
+    server_connect_timeout = 15
+    query_timeout = 0
+    query_wait_timeout = 120
+    client_idle_timeout = 0
+    idle_transaction_timeout = 0
+
+    # Performance
+    pkt_buf = 4096
+    listen_backlog = 128
+    sbuf_loopcnt = 5
+
+  userlist.txt: |
+    "postgres" "md5changeme-secure-password-hash"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgbouncer
+  namespace: security-saas
+  labels:
+    app: pgbouncer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pgbouncer
+  template:
+    metadata:
+      labels:
+        app: pgbouncer
+    spec:
+      containers:
+        - name: pgbouncer
+          image: edoburu/pgbouncer:latest
+          imagePullPolicy: Always
+          ports:
+            - name: postgresql
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://postgres:changeme-secure-password@postgresql.security-saas.svc.cluster.local:5432/security_saas"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: pgbouncer-config
+              mountPath: /etc/pgbouncer
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: pgbouncer-config
+          configMap:
+            name: pgbouncer-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgbouncer
+  namespace: security-saas
+  labels:
+    app: pgbouncer
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+  selector:
+    app: pgbouncer

@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: static-worker
+  namespace: security-saas
+  labels:
+    app: static-worker
+    component: analysis
+spec:
+  replicas: 2 # Minimum replicas, HPA will manage scaling
+  selector:
+    matchLabels:
+      app: static-worker
+  template:
+    metadata:
+      labels:
+        app: static-worker
+        component: analysis
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: static-worker
+      containers:
+        - name: static-worker
+          image: security-saas/static-worker:latest
+          imagePullPolicy: Always
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: METRICS_PORT
+              value: "9090"
+            - name: NATS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: worker-config
+                  key: nats_url
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database-credentials
+                  key: url
+            - name: YARA_RULES_DIR
+              value: "/etc/yara-rules"
+            - name: STORAGE_BASE_PATH
+              value: "/data/artifacts"
+            - name: RUST_LOG
+              value: "info,static_worker=debug"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          volumeMounts:
+            - name: yara-rules
+              mountPath: /etc/yara-rules
+              readOnly: true
+            - name: artifact-storage
+              mountPath: /data/artifacts
+      volumes:
+        - name: yara-rules
+          configMap:
+            name: yara-rules
+        - name: artifact-storage
+          persistentVolumeClaim:
+            claimName: artifact-storage-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: static-worker-metrics
+  namespace: security-saas
+  labels:
+    app: static-worker
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    app: static-worker
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: static-worker
+  namespace: security-saas

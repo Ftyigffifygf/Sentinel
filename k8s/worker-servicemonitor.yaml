@@ -1,0 +1,53 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: static-worker-metrics
+  namespace: security-saas
+  labels:
+    app: static-worker
+    prometheus: kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: static-worker
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+      scheme: http
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: dynamic-worker-metrics
+  namespace: security-saas
+  labels:
+    app: dynamic-worker
+    prometheus: kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: dynamic-worker
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+      scheme: http
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: behavioral-worker-metrics
+  namespace: security-saas
+  labels:
+    app: behavioral-worker
+    prometheus: kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: behavioral-worker
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+      scheme: http

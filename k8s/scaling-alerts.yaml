@@ -1,0 +1,126 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: worker-scaling-alerts
+  namespace: security-saas
+  labels:
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: worker_scaling
+      interval: 30s
+      rules:
+        # Alert when HPA is at maximum replicas
+        - alert: HPAMaxedOut
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{namespace="security-saas"}
+            >= 
+            kube_horizontalpodautoscaler_spec_max_replicas{namespace="security-saas"}
+          for: 15m
+          labels:
+            severity: warning
+            component: autoscaling
+          annotations:
+            summary: "HPA {{ $labels.horizontalpodautoscaler }} at maximum replicas"
+            description: "HPA {{ $labels.horizontalpodautoscaler }} has been at maximum replicas ({{ $value }}) for 15 minutes. Consider increasing max replicas or investigating load."
+
+        # Alert when HPA is at minimum replicas with high queue depth
+        - alert: HPAMinReplicasWithHighLoad
+          expr: |
+            (
+              kube_horizontalpodautoscaler_status_current_replicas{namespace="security-saas"}
+              <= 
+              kube_horizontalpodautoscaler_spec_min_replicas{namespace="security-saas"}
+            )
+            and
+            (
+              avg(analysis_queue_depth{namespace="security-saas"}) by (horizontalpodautoscaler) > 200
+            )
+          for: 10m
+          labels:
+            severity: warning
+            component: autoscaling
+          annotations:
+            summary: "HPA {{ $labels.horizontalpodautoscaler }} at minimum replicas with high load"
+            description: "HPA {{ $labels.horizontalpodautoscaler }} is at minimum replicas but queue depth is {{ $value }}. Consider increasing min replicas."
+
+        # Alert on frequent scaling events (thrashing)
+        - alert: FrequentScalingEvents
+          expr: |
+            rate(worker_scaling_events_total{namespace="security-saas"}[10m]) > 0.1
+          for: 15m
+          labels:
+            severity: warning
+            component: autoscaling
+          annotations:
+            summary: "Frequent scaling events for {{ $labels.worker_type }}"
+            description: "Worker {{ $labels.worker_type }} is experiencing frequent scaling events ({{ $value }} events/sec). This may indicate thrashing or unstable load."
+
+        # Alert on rapid scale-up
+        - alert: RapidScaleUp
+          expr: |
+            increase(worker_scaling_events_total{direction="up",namespace="security-saas"}[5m]) >= 3
+          labels:
+            severity: info
+            component: autoscaling
+          annotations:
+            summary: "Rapid scale-up detected for {{ $labels.worker_type }}"
+            description: "Worker {{ $labels.worker_type }} scaled up {{ $value }} times in 5 minutes. Reason: {{ $labels.reason }}"
+
+        # Alert when queue depth is high despite scaling
+        - alert: HighQueueDepthDespiteScaling
+          expr: |
+            (
+              analysis_queue_depth{namespace="security-saas"} > 500
+            )
+            and
+            (
+              rate(worker_scaling_events_total{direction="up",namespace="security-saas"}[10m]) > 0
+            )
+          for: 20m
+          labels:
+            severity: critical
+            component: autoscaling
+          annotations:
+            summary: "High queue depth persists for {{ $labels.worker_type }} despite scaling"
+            description: "Queue depth for {{ $labels.worker_type }} is {{ $value }} despite recent scale-up events. System may be under-provisioned or experiencing issues."
+
+        # Alert on scaling failures
+        - alert: HPAScalingFailure
+          expr: |
+            kube_horizontalpodautoscaler_status_condition{condition="ScalingLimited",status="true",namespace="security-saas"} == 1
+          for: 5m
+          labels:
+            severity: warning
+            component: autoscaling
+          annotations:
+            summary: "HPA {{ $labels.horizontalpodautoscaler }} scaling limited"
+            description: "HPA {{ $labels.horizontalpodautoscaler }} is unable to scale. Check resource quotas and cluster capacity."
+
+        # Alert on metric unavailability
+        - alert: HPAMetricsUnavailable
+          expr: |
+            kube_horizontalpodautoscaler_status_condition{condition="ScalingActive",status="false",namespace="security-saas"} == 1
+          for: 5m
+          labels:
+            severity: warning
+            component: autoscaling
+          annotations:
+            summary: "HPA {{ $labels.horizontalpodautoscaler }} metrics unavailable"
+            description: "HPA {{ $labels.horizontalpodautoscaler }} cannot obtain metrics. Check metrics server and custom metrics API."
+
+        # Record scaling event rate
+        - record: worker:scaling_events:rate5m
+          expr: |
+            rate(worker_scaling_events_total{namespace="security-saas"}[5m])
+
+        # Record average queue depth per worker type
+        - record: worker:queue_depth:avg
+          expr: |
+            avg(analysis_queue_depth{namespace="security-saas"}) by (worker_type)
+
+        # Record replica count changes
+        - record: worker:replica_count:delta
+          expr: |
+            delta(worker_replica_count{namespace="security-saas"}[5m])

@@ -1,0 +1,69 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: database-migration
+  namespace: security-saas
+  labels:
+    app: migration
+spec:
+  template:
+    metadata:
+      labels:
+        app: migration
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:14
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h postgresql.security-saas.svc.cluster.local -p 5432 -U postgres; do
+                echo "Waiting for PostgreSQL to be ready..."
+                sleep 2
+              done
+              echo "PostgreSQL is ready!"
+      containers:
+        - name: migrate
+          image: security-saas/api-layer:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "Running database migrations..."
+              sqlx migrate run --source /migrations
+              echo "Migrations completed successfully!"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-credentials
+                  key: url
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+      volumes:
+        - name: migrations
+          configMap:
+            name: database-migrations
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: database-migrations
+  namespace: security-saas
+data:
+  # Migration files will be mounted here
+  # In production, these should be included in the container image
+  README.md: |
+    Database migrations are managed using sqlx-cli.
+
+    Migrations are located in the /migrations directory of the repository.
+
+    To run migrations manually:
+    1. Port-forward to PostgreSQL: kubectl port-forward -n security-saas svc/postgresql 5432:5432
+    2. Run migrations: sqlx migrate run --database-url postgresql://postgres:password@localhost:5432/security_saas
+
+    To create a new migration:
+    sqlx migrate add <migration_name>

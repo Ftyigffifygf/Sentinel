@@ -1,0 +1,151 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-layer
+  namespace: security-saas
+  labels:
+    app: api-layer
+    component: api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-layer
+  template:
+    metadata:
+      labels:
+        app: api-layer
+        component: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: api-layer
+      containers:
+        - name: api
+          image: security-saas/api-layer:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: "info,api_layer=debug"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database-credentials
+                  key: url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: url
+            - name: NATS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: message-queue-config
+                  key: nats_url
+            - name: S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: storage-config
+                  key: endpoint
+            - name: S3_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: storage-config
+                  key: bucket
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: access_key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: s3-credentials
+                  key: secret_key
+            - name: OIDC_ISSUER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: auth-config
+                  key: issuer_url
+            - name: OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: oidc-credentials
+                  key: client_id
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: oidc-credentials
+                  key: client_secret
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: observability-config
+                  key: otlp_endpoint
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /etc/tls
+              readOnly: true
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: service-tls-certs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-layer
+  namespace: security-saas
+  labels:
+    app: api-layer
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+  selector:
+    app: api-layer
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api-layer
+  namespace: security-saas

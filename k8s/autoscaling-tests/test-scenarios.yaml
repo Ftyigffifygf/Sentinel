@@ -1,0 +1,347 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: autoscaling-test-scenarios
+  namespace: security-saas
+data:
+  test-scale-up.sh: |
+    #!/bin/bash
+    # Test Scenario 1: Scale-up under high load
+
+    set -e
+
+    echo "=== Test Scenario 1: Scale-up under high load ==="
+    echo ""
+
+    WORKER_TYPE="${WORKER_TYPE:-static-worker}"
+    HPA_NAME="${HPA_NAME:-static-worker-hpa}"
+
+    echo "1. Recording initial state..."
+    INITIAL_REPLICAS=$(kubectl get hpa -n security-saas $HPA_NAME -o jsonpath='{.status.currentReplicas}')
+    echo "   Initial replicas: $INITIAL_REPLICAS"
+
+    echo ""
+    echo "2. Checking initial queue depth..."
+    INITIAL_QUEUE=$(kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1/namespaces/security-saas/pods/*/analysis_queue_depth" 2>/dev/null | jq -r '.items[0].value' || echo "0")
+    echo "   Initial queue depth: $INITIAL_QUEUE"
+
+    echo ""
+    echo "3. Generating high load (1000 messages at 20 msg/sec)..."
+    kubectl create job -n security-saas load-test-scaleup-$(date +%s) \
+      --image=ubuntu:22.04 \
+      -- /bin/bash -c "
+        apt-get update -qq && apt-get install -y -qq curl bc uuid-runtime openssl > /dev/null 2>&1
+        curl -sf https://binaries.nats.dev/nats-io/natscli/nats@latest | sh
+        export PATH=\"\$PATH:\$HOME/.nats/bin\"
+        for i in \$(seq 1 1000); do
+          echo '{\"artifact_id\":\"test-\$(uuidgen)\",\"tenant_id\":\"test\"}' | \
+            nats pub artifacts.uploaded --server=nats://nats.security-saas.svc.cluster.local:4222 &
+          if [ \$(( i % 20 )) -eq 0 ]; then sleep 1; fi
+        done
+        wait
+      "
+
+    echo ""
+    echo "4. Waiting for queue to build up (30 seconds)..."
+    sleep 30
+
+    echo ""
+    echo "5. Checking queue depth after load..."
+    CURRENT_QUEUE=$(kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1/namespaces/security-saas/pods/*/analysis_queue_depth" 2>/dev/null | jq -r '.items[0].value' || echo "0")
+    echo "   Current queue depth: $CURRENT_QUEUE"
+
+    echo ""
+    echo "6. Monitoring HPA for scale-up (checking every 15 seconds for 5 minutes)..."
+    for i in {1..20}; do
+        CURRENT_REPLICAS=$(kubectl get hpa -n security-saas $HPA_NAME -o jsonpath='{.status.currentReplicas}')
+        DESIRED_REPLICAS=$(kubectl get hpa -n security-saas $HPA_NAME -o jsonpath='{.status.desiredReplicas}')
+        QUEUE_DEPTH=$(kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1/namespaces/security-saas/pods/*/analysis_queue_depth" 2>/dev/null | jq -r '.items[0].value' || echo "0")
+        
+        echo "   [$i/20] Current: $CURRENT_REPLICAS, Desired: $DESIRED_REPLICAS, Queue: $QUEUE_DEPTH"
+        
+        if [ "$CURRENT_REPLICAS" -gt "$INITIAL_REPLICAS" ]; then
+            echo ""
+            echo "✅ SUCCESS: Scale-up detected!"
+            echo "   Initial replicas: $INITIAL_REPLICAS"
+            echo "   Current replicas: $CURRENT_REPLICAS"
+            echo "   Scaled up by: $(( CURRENT_REPLICAS - INITIAL_REPLICAS ))"
+            exit 0
+        fi
+        
+        sleep 15
+    done
+
+    echo ""
+    echo "❌ FAILURE: No scale-up detected after 5 minutes"
+    echo "   Initial replicas: $INITIAL_REPLICAS"
+    echo "   Final replicas: $CURRENT_REPLICAS"
+    exit 1
+
+  test-scale-down.sh: |
+    #!/bin/bash
+    # Test Scenario 2: Scale-down during idle periods
+
+    set -e
+
+    echo "=== Test Scenario 2: Scale-down during idle periods ==="
+    echo ""
+
+    WORKER_TYPE="${WORKER_TYPE:-static-worker}"
+    HPA_NAME="${HPA_NAME:-static-worker-hpa}"
+
+    echo "1. Recording initial state..."
+    INITIAL_REPLICAS=$(kubectl get hpa -n security-saas $HPA_NAME -o jsonpath='{.status.currentReplicas}')
+    MIN_REPLICAS=$(kubectl get hpa -n security-saas $HPA_NAME -o jsonpath='{.spec.minReplicas}')
+    echo "   Initial replicas: $INITIAL_REPLICAS"
+    echo "   Min replicas: $MIN_REPLICAS"
+
+    if [ "$INITIAL_REPLICAS" -le "$MIN_REPLICAS" ]; then
+        echo ""
+        echo "⚠️  Already at minimum replicas. Triggering scale-up first..."
+        
+        # Generate load to scale up
+        kubectl create job -n security-saas load-test-scaledown-prep-$(date +%s) \
+          --image=ubuntu:22.04 \
+          -- /bin/bash -c "
+            apt-get update -qq && apt-get install -y -qq curl uuid-runtime > /dev/null 2>&1
+            curl -sf https://binaries.nats.dev/nats-io/natscli/nats@latest | sh
+            export PATH=\"\$PATH:\$HOME/.nats/bin\"
+            for i in \$(seq 1 500); do
+              echo '{\"artifact_id\":\"test-\$(uuidgen)\"}' | \
+                nats pub artifacts.uploaded --server=nats://nats.security-saas.svc.cluster.local:4222 &
+            done
+            wait
+          "
+        
+        echo "   Waiting for scale-up (2 minutes)..."
+        sleep 120
+        
+        INITIAL_REPLICAS=$(kubectl get hpa -n security-saas $HPA_NAME -o jsonpath='{.status.currentReplicas}')
+        echo "   New replica count: $INITIAL_REPLICAS"
+    fi
+
+    echo ""
+    echo "2. Ensuring queue is empty..."
+    echo "   Waiting for workers to process messages (5 minutes)..."
+    sleep 300
+
+    QUEUE_DEPTH=$(kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1/namespaces/security-saas/pods/*/analysis_queue_depth" 2>/dev/null | jq -r '.items[0].value' || echo "0")
+    echo "   Current queue depth: $QUEUE_DEPTH"
+
+    echo ""
+    echo "3. Monitoring HPA for scale-down (checking every 30 seconds for 10 minutes)..."
+    for i in {1..20}; do
+        CURRENT_REPLICAS=$(kubectl get hpa -n security-saas $HPA_NAME -o jsonpath='{.status.currentReplicas}')
+        DESIRED_REPLICAS=$(kubectl get hpa -n security-saas $HPA_NAME -o jsonpath='{.status.desiredReplicas}')
+        QUEUE_DEPTH=$(kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1/namespaces/security-saas/pods/*/analysis_queue_depth" 2>/dev/null | jq -r '.items[0].value' || echo "0")
+        
+        echo "   [$i/20] Current: $CURRENT_REPLICAS, Desired: $DESIRED_REPLICAS, Queue: $QUEUE_DEPTH"
+        
+        if [ "$CURRENT_REPLICAS" -lt "$INITIAL_REPLICAS" ]; then
+            echo ""
+            echo "✅ SUCCESS: Scale-down detected!"
+            echo "   Initial replicas: $INITIAL_REPLICAS"
+            echo "   Current replicas: $CURRENT_REPLICAS"
+            echo "   Scaled down by: $(( INITIAL_REPLICAS - CURRENT_REPLICAS ))"
+            exit 0
+        fi
+        
+        sleep 30
+    done
+
+    echo ""
+    echo "❌ FAILURE: No scale-down detected after 10 minutes"
+    echo "   Initial replicas: $INITIAL_REPLICAS"
+    echo "   Final replicas: $CURRENT_REPLICAS"
+    exit 1
+
+  test-min-replicas.sh: |
+    #!/bin/bash
+    # Test Scenario 3: Minimum replica enforcement
+
+    set -e
+
+    echo "=== Test Scenario 3: Minimum replica enforcement ==="
+    echo ""
+
+    HPA_NAME="${HPA_NAME:-static-worker-hpa}"
+
+    echo "1. Getting HPA configuration..."
+    MIN_REPLICAS=$(kubectl get hpa -n security-saas $HPA_NAME -o jsonpath='{.spec.minReplicas}')
+    echo "   Configured min replicas: $MIN_REPLICAS"
+
+    echo ""
+    echo "2. Monitoring replica count for 5 minutes..."
+    VIOLATIONS=0
+
+    for i in {1..20}; do
+        CURRENT_REPLICAS=$(kubectl get hpa -n security-saas $HPA_NAME -o jsonpath='{.status.currentReplicas}')
+        QUEUE_DEPTH=$(kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1/namespaces/security-saas/pods/*/analysis_queue_depth" 2>/dev/null | jq -r '.items[0].value' || echo "0")
+        
+        echo "   [$i/20] Current replicas: $CURRENT_REPLICAS, Queue: $QUEUE_DEPTH"
+        
+        if [ "$CURRENT_REPLICAS" -lt "$MIN_REPLICAS" ]; then
+            echo "   ⚠️  VIOLATION: Replicas below minimum!"
+            VIOLATIONS=$(( VIOLATIONS + 1 ))
+        fi
+        
+        sleep 15
+    done
+
+    echo ""
+    if [ "$VIOLATIONS" -eq 0 ]; then
+        echo "✅ SUCCESS: Minimum replicas enforced throughout test"
+        echo "   No violations detected"
+        exit 0
+    else
+        echo "❌ FAILURE: Minimum replicas violated $VIOLATIONS times"
+        exit 1
+    fi
+
+  test-all.sh: |
+    #!/bin/bash
+    # Run all autoscaling tests
+
+    set -e
+
+    echo "========================================="
+    echo "  Autoscaling Test Suite"
+    echo "========================================="
+    echo ""
+
+    WORKER_TYPE="${WORKER_TYPE:-static-worker}"
+    HPA_NAME="${HPA_NAME:-static-worker-hpa}"
+
+    export WORKER_TYPE
+    export HPA_NAME
+
+    PASSED=0
+    FAILED=0
+
+    # Test 1: Scale-up
+    echo ""
+    if /scripts/test-scale-up.sh; then
+        PASSED=$(( PASSED + 1 ))
+    else
+        FAILED=$(( FAILED + 1 ))
+    fi
+
+    echo ""
+    echo "Waiting 2 minutes before next test..."
+    sleep 120
+
+    # Test 2: Scale-down
+    echo ""
+    if /scripts/test-scale-down.sh; then
+        PASSED=$(( PASSED + 1 ))
+    else
+        FAILED=$(( FAILED + 1 ))
+    fi
+
+    echo ""
+    echo "Waiting 2 minutes before next test..."
+    sleep 120
+
+    # Test 3: Min replicas
+    echo ""
+    if /scripts/test-min-replicas.sh; then
+        PASSED=$(( PASSED + 1 ))
+    else
+        FAILED=$(( FAILED + 1 ))
+    fi
+
+    # Summary
+    echo ""
+    echo "========================================="
+    echo "  Test Summary"
+    echo "========================================="
+    echo "Passed: $PASSED"
+    echo "Failed: $FAILED"
+    echo ""
+
+    if [ "$FAILED" -eq 0 ]; then
+        echo "✅ All tests passed!"
+        exit 0
+    else
+        echo "❌ Some tests failed"
+        exit 1
+    fi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: autoscaling-test-suite
+  namespace: security-saas
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: autoscaling-test
+    spec:
+      restartPolicy: Never
+      serviceAccountName: autoscaling-test
+      containers:
+        - name: test-runner
+          image: bitnami/kubectl:latest
+          command: ["/bin/bash"]
+          args: ["/scripts/test-all.sh"]
+          env:
+            - name: WORKER_TYPE
+              value: "static-worker"
+            - name: HPA_NAME
+              value: "static-worker-hpa"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: scripts
+          configMap:
+            name: autoscaling-test-scenarios
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: autoscaling-test
+  namespace: security-saas
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: autoscaling-test
+  namespace: security-saas
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list"]
+  - apiGroups: ["custom.metrics.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: autoscaling-test
+  namespace: security-saas
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: autoscaling-test
+subjects:
+  - kind: ServiceAccount
+    name: autoscaling-test
+    namespace: security-saas

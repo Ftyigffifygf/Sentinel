@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamic-worker
+  namespace: security-saas
+  labels:
+    app: dynamic-worker
+    component: analysis
+spec:
+  replicas: 2 # Minimum replicas, HPA will manage scaling
+  selector:
+    matchLabels:
+      app: dynamic-worker
+  template:
+    metadata:
+      labels:
+        app: dynamic-worker
+        component: analysis
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: dynamic-worker
+      # Dynamic workers need privileged access for sandboxing
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: dynamic-worker
+          image: security-saas/dynamic-worker:latest
+          imagePullPolicy: Always
+          ports:
+            - name: metrics
+              containerPort: 9091
+              protocol: TCP
+          env:
+            - name: METRICS_PORT
+              value: "9091"
+            - name: NATS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: worker-config
+                  key: nats_url
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database-credentials
+                  key: url
+            - name: SANDBOX_TYPE
+              value: "container"
+            - name: SANDBOX_TIMEOUT_SECS
+              value: "300"
+            - name: RUST_LOG
+              value: "info,dynamic_worker=debug"
+          resources:
+            requests:
+              cpu: 1000m
+              memory: 2Gi
+            limits:
+              cpu: 4000m
+              memory: 8Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 2
+          # Privileged mode for sandbox operations
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - NET_ADMIN
+          volumeMounts:
+            - name: sandbox-storage
+              mountPath: /var/lib/sandbox
+      volumes:
+        - name: sandbox-storage
+          emptyDir:
+            sizeLimit: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamic-worker-metrics
+  namespace: security-saas
+  labels:
+    app: dynamic-worker
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 9091
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    app: dynamic-worker
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dynamic-worker
+  namespace: security-saas
